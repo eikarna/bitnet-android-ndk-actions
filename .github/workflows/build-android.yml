@@ -33,6 +33,13 @@ on:
         description: "Android NDK version"
         required: true
         default: "r27c"
+      upload_release:
+        description: "Upload this manual build to GitHub Releases"
+        required: true
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 */6 * * *"
   push:
     branches: [main]
   pull_request:
@@ -41,10 +48,96 @@ permissions:
   contents: read
 
 jobs:
+  resolve-builds:
+    name: Resolve BitNet refs to build
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+
+    steps:
+      - name: Resolve build matrix
+        id: resolve
+        uses: actions/github-script@v7
+        env:
+          BITNET_REF: ${{ inputs.bitnet_ref || 'main' }}
+          MODEL_PROFILE: ${{ inputs.model_profile || 'BitNet-b1.58-2B-4T' }}
+          QUANT_TYPE: ${{ inputs.quant_type || 'i2_s' }}
+          ANDROID_PLATFORM: ${{ inputs.android_platform || 'android-28' }}
+          NDK_VERSION: ${{ inputs.ndk_version || 'r27c' }}
+          UPLOAD_RELEASE: ${{ inputs.upload_release || 'false' }}
+        with:
+          script: |
+            const sanitize = (value) => value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'ref';
+            const entry = ({ bitnetRef, modelProfile, quantType, androidPlatform, ndkVersion, uploadRelease }) => {
+              const suffix = sanitize(`${bitnetRef}-${quantType}`);
+              return {
+                bitnet_ref: bitnetRef,
+                model_profile: modelProfile,
+                quant_type: quantType,
+                android_platform: androidPlatform,
+                ndk_version: ndkVersion,
+                upload_release: uploadRelease ? 'true' : 'false',
+                release_tag: `bitnet-${suffix}`,
+                release_name: `BitNet ${bitnetRef} Android ARM64 (${quantType})`,
+                artifact_name: `bitnet-android-arm64-${suffix}`,
+                archive_name: `bitnet-android-arm64-${suffix}.tar.gz`,
+              };
+            };
+
+            let include = [];
+
+            if (context.eventName === 'schedule') {
+              const upstreamTags = await github.paginate(github.rest.repos.listTags, {
+                owner: 'microsoft',
+                repo: 'BitNet',
+                per_page: 100,
+              });
+              const releases = await github.paginate(github.rest.repos.listReleases, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              });
+              const releasedTags = new Set(releases.map((release) => release.tag_name));
+              const missing = upstreamTags
+                .map((tag) => tag.name)
+                .filter((tagName) => !releasedTags.has(`bitnet-${sanitize(`${tagName}-i2_s`)}`))
+                .slice(0, 5);
+
+              include = missing.map((tagName) => entry({
+                bitnetRef: tagName,
+                modelProfile: 'BitNet-b1.58-2B-4T',
+                quantType: 'i2_s',
+                androidPlatform: 'android-28',
+                ndkVersion: 'r27c',
+                uploadRelease: true,
+              }));
+            } else {
+              include = [entry({
+                bitnetRef: process.env.BITNET_REF,
+                modelProfile: process.env.MODEL_PROFILE,
+                quantType: process.env.QUANT_TYPE,
+                androidPlatform: process.env.ANDROID_PLATFORM,
+                ndkVersion: process.env.NDK_VERSION,
+                uploadRelease: context.eventName === 'workflow_dispatch' && process.env.UPLOAD_RELEASE === 'true',
+              })];
+            }
+
+            core.setOutput('matrix', JSON.stringify({ include }));
+            core.setOutput('should_build', include.length > 0 ? 'true' : 'false');
+            core.info(include.length > 0 ? `Resolved ${include.length} build(s).` : 'No new upstream BitNet tags to build.');
+
   build-android-arm64:
-    name: Android ARM64 (${{ inputs.quant_type || 'i2_s' }})
+    name: Android ARM64 (${{ matrix.bitnet_ref }}, ${{ matrix.quant_type }})
+    needs: resolve-builds
+    if: needs.resolve-builds.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve-builds.outputs.matrix) }}
 
     steps:
       - name: Checkout builder
@@ -59,7 +152,7 @@ jobs:
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: ${{ inputs.ndk_version || 'r27c' }}
+          ndk-version: ${{ matrix.ndk_version }}
           link-to-sdk: true
 
       - name: Install host build tools
@@ -70,25 +163,65 @@ jobs:
       - name: Build BitNet Android binaries
         env:
           ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-          BITNET_REF: ${{ inputs.bitnet_ref || 'main' }}
-          MODEL_PROFILE: ${{ inputs.model_profile || 'BitNet-b1.58-2B-4T' }}
-          QUANT_TYPE: ${{ inputs.quant_type || 'i2_s' }}
-          ANDROID_PLATFORM: ${{ inputs.android_platform || 'android-28' }}
+          BITNET_REF: ${{ matrix.bitnet_ref }}
+          MODEL_PROFILE: ${{ matrix.model_profile }}
+          QUANT_TYPE: ${{ matrix.quant_type }}
+          ANDROID_PLATFORM: ${{ matrix.android_platform }}
           ANDROID_ABI: arm64-v8a
           BUILD_DIR: build-android-arm64
           OUT_DIR: ${{ github.workspace }}/dist/bitnet-android-arm64
         run: bash scripts/build-bitnet-android.sh
 
-      - name: Create archive
-        run: |
-          cd dist
-          tar -czf bitnet-android-arm64-${{ inputs.quant_type || 'i2_s' }}.tar.gz bitnet-android-arm64
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bitnet-android-arm64-${{ inputs.quant_type || 'i2_s' }}
-          path: |
-            dist/bitnet-android-arm64
-            dist/bitnet-android-arm64-${{ inputs.quant_type || 'i2_s' }}.tar.gz
+          name: ${{ matrix.artifact_name }}
+          path: dist/bitnet-android-arm64
           if-no-files-found: error
+
+  upload-release:
+    name: Upload Release (${{ matrix.bitnet_ref }}, ${{ matrix.quant_type }})
+    needs:
+      - resolve-builds
+      - build-android-arm64
+    if: needs.resolve-builds.outputs.should_build == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve-builds.outputs.matrix) }}
+
+    steps:
+      - name: Download build artifact
+        if: matrix.upload_release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release-root
+
+      - name: Create release archive
+        if: matrix.upload_release == 'true'
+        run: |
+          mkdir -p dist/releases release-package
+          if [ -d release-root/bitnet-android-arm64 ]; then
+            tar -C release-root -czf "dist/releases/${{ matrix.archive_name }}" bitnet-android-arm64
+          else
+            mkdir -p release-package/bitnet-android-arm64
+            cp -a release-root/. release-package/bitnet-android-arm64/
+            tar -C release-package -czf "dist/releases/${{ matrix.archive_name }}" bitnet-android-arm64
+          fi
+
+      - name: Upload GitHub Release
+        if: matrix.upload_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.release_tag }}
+          name: ${{ matrix.release_name }}
+          body: |
+            Automated Android ARM64 build for upstream microsoft/BitNet ref `${{ matrix.bitnet_ref }}`.
+
+            - Quant/kernel type: `${{ matrix.quant_type }}`
+            - Android platform: `${{ matrix.android_platform }}`
+            - NDK version: `${{ matrix.ndk_version }}`
+          files: dist/releases/${{ matrix.archive_name }}

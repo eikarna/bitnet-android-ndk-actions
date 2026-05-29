@@ -12,6 +12,8 @@ Repo ini tidak mem-vendor source BitNet. Workflow akan clone upstream BitNet sec
 4. Download artifact `bitnet-android-arm64-*` dari run tersebut.
 5. Ekstrak artifact di Termux `$HOME`, lalu jalankan binary dari folder `bin/`.
 
+Artifact Actions hanya berisi folder hasil build `bitnet-android-arm64/`. Arsip `.tar.gz` hanya dibuat saat build diupload ke GitHub Releases, sehingga artifact tidak menyimpan duplikat file besar.
+
 Contoh menjalankan I2_S model di Termux:
 
 ```sh
@@ -39,3 +41,16 @@ Artifact berisi:
 - metadata build
 
 Default build menggunakan `BITNET_ARM_TL1=OFF`, cocok untuk model I2_S. Jika ingin TL1 ARM kernels, jalankan workflow dengan `quant_type=tl1`.
+
+## Releases otomatis dari tag upstream
+
+Workflow juga berjalan terjadwal setiap 6 jam untuk mengecek tag baru di `microsoft/BitNet`.
+
+Jika ada tag upstream yang belum punya release di repo ini, workflow akan:
+
+1. Build tag BitNet tersebut untuk Android ARM64.
+2. Upload artifact Actions untuk run tersebut.
+3. Membuat GitHub Release dengan tag repo ini berbentuk `bitnet-<upstream-tag>-i2_s`.
+4. Mengunggah asset `.tar.gz` ke tab **Releases**.
+
+Saat ini upstream `microsoft/BitNet` belum memiliki tag, jadi workflow terjadwal akan skip sampai tag pertama tersedia.
