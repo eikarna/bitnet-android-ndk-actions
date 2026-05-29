@@ -1,0 +1,94 @@
+name: Build BitNet for Android / Termux
+
+on:
+  workflow_dispatch:
+    inputs:
+      bitnet_ref:
+        description: "BitNet git ref to build"
+        required: true
+        default: "main"
+      model_profile:
+        description: "Kernel profile"
+        required: true
+        type: choice
+        default: "BitNet-b1.58-2B-4T"
+        options:
+          - BitNet-b1.58-2B-4T
+          - bitnet_b1_58-3B
+          - bitnet_b1_58-large
+          - Llama3-8B-1.58-100B-tokens
+      quant_type:
+        description: "Quant/kernel type"
+        required: true
+        type: choice
+        default: "i2_s"
+        options:
+          - i2_s
+          - tl1
+      android_platform:
+        description: "Android API level"
+        required: true
+        default: "android-28"
+      ndk_version:
+        description: "Android NDK version"
+        required: true
+        default: "r27c"
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-arm64:
+    name: Android ARM64 (${{ inputs.quant_type || 'i2_s' }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ inputs.ndk_version || 'r27c' }}
+          link-to-sdk: true
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build git
+
+      - name: Build BitNet Android binaries
+        env:
+          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+          BITNET_REF: ${{ inputs.bitnet_ref || 'main' }}
+          MODEL_PROFILE: ${{ inputs.model_profile || 'BitNet-b1.58-2B-4T' }}
+          QUANT_TYPE: ${{ inputs.quant_type || 'i2_s' }}
+          ANDROID_PLATFORM: ${{ inputs.android_platform || 'android-28' }}
+          ANDROID_ABI: arm64-v8a
+          BUILD_DIR: build-android-arm64
+          OUT_DIR: ${{ github.workspace }}/dist/bitnet-android-arm64
+        run: bash scripts/build-bitnet-android.sh
+
+      - name: Create archive
+        run: |
+          cd dist
+          tar -czf bitnet-android-arm64-${{ inputs.quant_type || 'i2_s' }}.tar.gz bitnet-android-arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitnet-android-arm64-${{ inputs.quant_type || 'i2_s' }}
+          path: |
+            dist/bitnet-android-arm64
+            dist/bitnet-android-arm64-${{ inputs.quant_type || 'i2_s' }}.tar.gz
+          if-no-files-found: error

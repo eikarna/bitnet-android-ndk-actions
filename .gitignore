@@ -1,0 +1,8 @@
+BitNet/
+dist/
+build-*/
+*.zip
+*.tar.gz
+*.gguf
+*.log
+.DS_Store
